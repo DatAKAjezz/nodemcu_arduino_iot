@@ -78,6 +78,24 @@ BLYNK_WRITE(V2) {
     }
 }
 
+// Nút Disable (V3)
+BLYNK_WRITE(V3) {
+    int value = param.asInt();
+    if (value == 1) {
+        debugPrint("BLYNK khóa hệ thống!");
+        digitalWrite(SIGNAL_PIN, HIGH);
+        delay(1500); // HIGH 1500ms cho khóa hệ thống
+        digitalWrite(SIGNAL_PIN, LOW);
+        sendToGoogleSheet("System", "Locked");
+    } else {
+        debugPrint("BLYNK mở khóa hệ thống!");
+        digitalWrite(SIGNAL_PIN, HIGH);
+        delay(2000); // HIGH 2000ms cho mở khóa hệ thống
+        digitalWrite(SIGNAL_PIN, LOW);
+        sendToGoogleSheet("System", "Unlocked");
+    }
+}
+
 void loop() {
     Blynk.run();
     
@@ -99,6 +117,12 @@ void loop() {
                 String status = data.substring(commaIndex + 1);
                 debugPrint("Parsed: Method=" + method + ", Status=" + status);
                 sendToGoogleSheet(method, status);
+                
+                // Gửi thông báo trộm qua Blynk nếu phát hiện trộm
+                if (method == "Theft" && status == "Detected") {
+                    Blynk.logEvent("theft_detected", "CẢNH BÁO: Phát hiện trộm!");
+                    debugPrint("Đã gửi thông báo trộm qua Blynk");
+                }
             } else {
                 debugPrint("Invalid log format");
             }

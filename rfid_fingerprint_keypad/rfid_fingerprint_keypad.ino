@@ -47,8 +47,12 @@ int failCount = 0;
 bool connectionTested = false;
 unsigned long lastVibrationCheck = 0;
 const unsigned long vibrationInterval = 1000;
-bool adminMode = false; // Trạng thái Admin Menu
-String currentPIN = "1234"; // PIN hiện tại, có thể thay đổi
+bool adminMode = false;
+String currentPIN = "1234";
+bool systemLocked = false; // Trạng thái khóa hệ thống
+unsigned long previousBuzzTime = 0; // Thời gian bật/tắt buzzer trước đó
+bool buzzerState = false; // Trạng thái hiện tại của buzzer (HIGH/LOW)
+bool theftDetected = false; // Trạng thái phát hiện trộm
 
 void setup() {
     espSerial.begin(9600);
@@ -120,12 +124,23 @@ void beepError() {
 }
 
 void beepTheft() {
-    for (int i = 0; i < 10; i++) {
-        digitalWrite(BUZZER_PIN, HIGH);
-        delay(200);
-        digitalWrite(BUZZER_PIN, LOW);
-        delay(200);
+    unsigned long startTime = millis();
+    const unsigned long theftDuration = 10000; // 10 giây
+    const unsigned long buzzInterval = 200; // Thời gian bật/tắt buzzer (200ms)
+    espSerial.println("Buzzer Theft Started");
+    
+    while (millis() - startTime < theftDuration) {
+        // Điều khiển buzzer không dùng delay
+        unsigned long currentTime = millis();
+        if (currentTime - previousBuzzTime >= buzzInterval) {
+            buzzerState = !buzzerState; // Đổi trạng thái buzzer
+            digitalWrite(BUZZER_PIN, buzzerState ? HIGH : LOW);
+            previousBuzzTime = currentTime;
+        }
     }
+    digitalWrite(BUZZER_PIN, LOW); // Đảm bảo buzzer tắt khi thoát
+    theftDetected = false; // Reset trạng thái trộm sau khi kết thúc
+    espSerial.println("Buzzer Theft Ended");
 }
 
 void sendLog(String method, String status) {
@@ -139,18 +154,31 @@ void loop() {
     if (digitalRead(SIGNAL_PIN) == HIGH) {
         unsigned long signalStart = millis();
         while (digitalRead(SIGNAL_PIN) == HIGH) {
-            if (millis() - signalStart > 1500) break; // Thoát nếu tín hiệu quá dài
+            if (millis() - signalStart > 3000) break; // Thoát nếu tín hiệu quá dài
         }
         unsigned long signalDuration = millis() - signalStart;
         
-        if (signalDuration >= 800 && signalDuration <= 1200) { // 1000ms ± 200ms cho Admin Menu
-            adminMode = true;
-            showAdminMenu();
-        } else if (signalDuration >= 300 && signalDuration <= 700) { // 500ms ± 200ms cho mở cửa
-            grantAccess("Blynk");
+        if (signalDuration >= 300 && signalDuration <= 700) { // 500ms ± 200ms cho mở cửa
+            if (!systemLocked) grantAccess("Blynk");
+        } else if (signalDuration >= 800 && signalDuration <= 1200) { // 1000ms ± 200ms cho Admin Menu
+            if (!systemLocked) {
+                adminMode = true;
+                showAdminMenu();
+            }
+        } else if (signalDuration >= 1300 && signalDuration <= 1700) { // 1500ms ± 200ms cho khóa hệ thống
+            systemLocked = true;
+            lcd.clear();
+            lcd.print("LOCKED!");
+            sendLog("System", "Locked");
+        } else if (signalDuration >= 1800 && signalDuration <= 2200) { // 2000ms ± 200ms cho mở khóa hệ thống
+            systemLocked = false;
+            showMenu();
+            sendLog("System", "Unlocked");
         }
         delay(500); // Chờ tín hiệu kết thúc
     }
+
+    if (systemLocked) return; // Không xử lý thêm nếu hệ thống bị khóa
 
     char key = keypad.getKey();
     if (key) {
@@ -231,7 +259,7 @@ void changePIN() {
                 lcd.setCursor(newPIN.length() - 1, 1);
                 lcd.print("*");
             } else if (key == '#') {
-                if (newPIN.length() >= 4) { // Đảm bảo PIN mới ít nhất 4 số
+                if (newPIN.length() >= 4) {
                     currentPIN = newPIN;
                     lcd.clear();
                     lcd.print("PIN da doi!");
@@ -340,12 +368,12 @@ void enrollFingerprint() {
 }
 
 int getNextFingerprintID() {
-    for (int id = 1; id < 128; id++) { // Giới hạn 127 vân tay
+    for (int id = 1; id < 128; id++) {
         if (finger.loadModel(id) != FINGERPRINT_OK) {
-            return id; // ID này chưa được dùng
+            return id;
         }
     }
-    return -1; // Không còn ID trống
+    return -1;
 }
 
 void checkPIN(char key) {
@@ -463,12 +491,15 @@ void askToExit() {
 }
 
 void checkVibration() {
-    if (digitalRead(VIBRATION_PIN) == HIGH) {
+    if (digitalRead(VIBRATION_PIN) == HIGH && !theftDetected) { // Chỉ kích hoạt nếu chưa phát hiện trộm
+        theftDetected = true; // Đánh dấu đã phát hiện trộm
         lcd.clear();
         lcd.print("CANH BAO TROM!");
-        beepTheft();
         sendLog("Theft", "Detected");
-        delay(2000);
+        beepTheft();
+        delay(3000); // Chờ 3 giây sau khi buzzer dừng
         showMenu();
+    } else if (digitalRead(VIBRATION_PIN) == LOW) {
+        theftDetected = false; // Reset trạng thái khi cảm biến không rung nữa
     }
 }
