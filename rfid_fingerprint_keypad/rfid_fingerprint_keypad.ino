@@ -15,10 +15,10 @@
 #define I2C_ADDR_KEYPAD 0x20
 #define I2C_ADDR_LCD 0x27
 #define SERVO_PIN 8
-#define SIGNAL_PIN 5  // Nhận tín hiệu từ ESP8266 qua D5
+#define SIGNAL_PIN 5
 #define BUZZER_PIN 4
-#define VIBRATION_PIN 2  // Cảm biến rung trên D2
-#define PIN_ADDRESS 0  // Địa chỉ EEPROM để lưu PIN
+#define VIBRATION_PIN 2
+#define PIN_ADDRESS 0
 
 // Các đối tượng
 Servo doorServo;
@@ -50,11 +50,14 @@ bool connectionTested = false;
 unsigned long lastVibrationCheck = 0;
 const unsigned long vibrationInterval = 1000;
 bool adminMode = false;
-String currentPIN = "";  // PIN sẽ được đọc từ EEPROM
+String currentPIN = "";
 bool systemLocked = false;
 unsigned long previousBuzzTime = 0;
 bool buzzerState = false;
 bool theftDetected = false;
+unsigned long lastInteractionTime = 0;
+const unsigned long backlightTimeout = 10000;
+bool backlightOn = true;
 
 void setup() {
     espSerial.begin(9600);
@@ -68,6 +71,7 @@ void setup() {
     keypad.begin(makeKeymap(keys));
     lcd.init();
     lcd.backlight();
+    backlightOn = true;
     lcd.setCursor(0, 0);
     lcd.print("Khoi dong...");
     delay(1000);
@@ -85,13 +89,13 @@ void setup() {
     doorServo.attach(SERVO_PIN);
     doorServo.write(0);
     
-    // Đọc PIN từ EEPROM
     readPINFromEEPROM();
-    if (currentPIN == "") { // Nếu chưa có PIN trong EEPROM
-        currentPIN = "1234"; // PIN mặc định
-        writePINToEEPROM(currentPIN); // Lưu PIN mặc định vào EEPROM
+    if (currentPIN == "") {
+        currentPIN = "1234";
+        writePINToEEPROM(currentPIN);
     }
     
+    lastInteractionTime = millis();
     testESPConnection();
     showMenu();
 }
@@ -134,8 +138,8 @@ void beepError() {
 
 void beepTheft() {
     unsigned long startTime = millis();
-    const unsigned long theftDuration = 10000; // 10 giây
-    const unsigned long buzzInterval = 200; // Thời gian bật/tắt buzzer (200ms)
+    const unsigned long theftDuration = 5000;
+    const unsigned long buzzInterval = 200;
     espSerial.println("Buzzer Theft Started");
     
     while (millis() - startTime < theftDuration) {
@@ -165,7 +169,7 @@ void loop() {
         }
         unsigned long signalDuration = millis() - signalStart;
         
-        if (signalDuration >= 300 && signalDuration <= 700) {
+        if (signalDuration >= 300 && signalDuration <= 700 && mode != 'B') {
             if (!systemLocked) grantAccess("Blynk");
         } else if (signalDuration >= 800 && signalDuration <= 1200) {
             if (!systemLocked) {
@@ -179,8 +183,17 @@ void loop() {
             sendLog("System", "Locked");
         } else if (signalDuration >= 1800 && signalDuration <= 2200) {
             systemLocked = false;
+            theftDetected = false;
+            lcd.clear();
+            lcd.print("UNLOCKED by Blynk");
+            sendLog("System", "Unlocked_by_Blynk");
+            delay(2000);
             showMenu();
-            sendLog("System", "Unlocked");
+        }
+        lastInteractionTime = millis();
+        if (!backlightOn) {
+            lcd.backlight();
+            backlightOn = true;
         }
         delay(500);
     }
@@ -189,17 +202,27 @@ void loop() {
 
     char key = keypad.getKey();
     if (key) {
+        if (!backlightOn) {
+            lcd.backlight();
+            backlightOn = true;
+        }
+        lastInteractionTime = millis();
         if (adminMode) handleAdminKeyPress(key);
         else handleKeyPress(key);
+    }
+
+    unsigned long currentTime = millis();
+    if (backlightOn && (currentTime - lastInteractionTime >= backlightTimeout)) {
+        lcd.noBacklight();
+        backlightOn = false;
     }
 
     if (!adminMode) {
         if (mode == 'B') checkFingerprint();
         else if (mode == 'C') checkRFID();
 
-        unsigned long currentTime = millis();
         if (currentTime - lastVibrationCheck >= vibrationInterval) {
-            checkVibration();
+            if (mode != 'B') checkVibration();
             lastVibrationCheck = currentTime;
         }
     }
@@ -304,7 +327,7 @@ void changePIN() {
             } else if (key == '#') {
                 if (confirmPIN == newPIN) {
                     currentPIN = newPIN;
-                    writePINToEEPROM(currentPIN); // Lưu PIN mới vào EEPROM
+                    writePINToEEPROM(currentPIN);
                     lcd.clear();
                     lcd.print("PIN da doi!");
                     sendLog("Admin", "PIN_Changed");
@@ -517,12 +540,32 @@ void checkRFID() {
 }
 
 void checkFingerprint() {
+    lcd.clear();
+    lcd.print("Quet van tay...");
+
     int p = finger.getImage();
-    if (p != FINGERPRINT_OK) return;
-    
+    if (p == FINGERPRINT_NOFINGER) return;
+    if (p != FINGERPRINT_OK) {
+        lcd.clear();
+        lcd.print("Loi quet!");
+        beepError();
+        delay(1000);
+        lcd.clear();
+        lcd.print("Quet van tay...");
+        return;
+    }
+
     p = finger.image2Tz();
-    if (p != FINGERPRINT_OK) return;
-    
+    if (p != FINGERPRINT_OK) {
+        lcd.clear();
+        lcd.print("Loi xu ly!");
+        beepError();
+        delay(1000);
+        lcd.clear();
+        lcd.print("Quet van tay...");
+        return;
+    }
+
     p = finger.fingerFastSearch();
     if (p == FINGERPRINT_OK) {
         lcd.clear();
@@ -548,11 +591,30 @@ void grantAccess(String method) {
     sendLog(method, "Success");
     lcd.clear();
     lcd.print("Cua Mo...");
-    doorServo.write(90);
+    if (!backlightOn) {
+        lcd.backlight();
+        backlightOn = true;
+    }
+    lastInteractionTime = millis();
+
+    bool previousTheftDetected = theftDetected;
+    theftDetected = true;
+
+    for (int angle = 0; angle <= 90; angle += 5) {
+        doorServo.write(angle);
+        delay(50);
+    }
+
     delay(2000);
-    doorServo.write(0);
+
     lcd.clear();
-    lcd.print("Cua Dong!");
+    lcd.print("Cua Dong...");
+    for (int angle = 90; angle >= 0; angle -= 3) {
+        doorServo.write(angle);
+        delay(50);
+    }
+
+    theftDetected = previousTheftDetected;
     delay(1000);
     mode = 'D';
     showMenu();
@@ -581,17 +643,25 @@ void checkVibration() {
         theftDetected = true;
         lcd.clear();
         lcd.print("CANH BAO TROM!");
+        if (!backlightOn) {
+            lcd.backlight();
+            backlightOn = true;
+        }
+        lastInteractionTime = millis();
         sendLog("Theft", "Detected");
         beepTheft();
+        systemLocked = true;
+        lcd.clear();
+        lcd.print("LOCKED by Theft");
+        sendLog("System", "Locked_by_Theft");
         delay(3000);
-        showMenu();
     } else if (digitalRead(VIBRATION_PIN) == LOW) {
         theftDetected = false;
     }
 }
 
 void readPINFromEEPROM() {
-    char storedPIN[5]; // 4 ký tự + '\0'
+    char storedPIN[5];
     for (int i = 0; i < 4; i++) {
         storedPIN[i] = EEPROM.read(PIN_ADDRESS + i);
     }
