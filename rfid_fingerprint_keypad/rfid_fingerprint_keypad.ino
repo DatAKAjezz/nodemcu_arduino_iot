@@ -7,6 +7,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <Servo.h>
 #include <SoftwareSerial.h>
+#include <EEPROM.h>
 
 // Pin definitions
 #define SS_PIN 10
@@ -17,6 +18,7 @@
 #define SIGNAL_PIN 5  // Nhận tín hiệu từ ESP8266 qua D5
 #define BUZZER_PIN 4
 #define VIBRATION_PIN 2  // Cảm biến rung trên D2
+#define PIN_ADDRESS 0  // Địa chỉ EEPROM để lưu PIN
 
 // Các đối tượng
 Servo doorServo;
@@ -48,11 +50,11 @@ bool connectionTested = false;
 unsigned long lastVibrationCheck = 0;
 const unsigned long vibrationInterval = 1000;
 bool adminMode = false;
-String currentPIN = "1234";
-bool systemLocked = false; // Trạng thái khóa hệ thống
-unsigned long previousBuzzTime = 0; // Thời gian bật/tắt buzzer trước đó
-bool buzzerState = false; // Trạng thái hiện tại của buzzer (HIGH/LOW)
-bool theftDetected = false; // Trạng thái phát hiện trộm
+String currentPIN = "";  // PIN sẽ được đọc từ EEPROM
+bool systemLocked = false;
+unsigned long previousBuzzTime = 0;
+bool buzzerState = false;
+bool theftDetected = false;
 
 void setup() {
     espSerial.begin(9600);
@@ -82,6 +84,13 @@ void setup() {
     
     doorServo.attach(SERVO_PIN);
     doorServo.write(0);
+    
+    // Đọc PIN từ EEPROM
+    readPINFromEEPROM();
+    if (currentPIN == "") { // Nếu chưa có PIN trong EEPROM
+        currentPIN = "1234"; // PIN mặc định
+        writePINToEEPROM(currentPIN); // Lưu PIN mặc định vào EEPROM
+    }
     
     testESPConnection();
     showMenu();
@@ -132,13 +141,13 @@ void beepTheft() {
     while (millis() - startTime < theftDuration) {
         unsigned long currentTime = millis();
         if (currentTime - previousBuzzTime >= buzzInterval) {
-            buzzerState = !buzzerState; // Đổi trạng thái buzzer
+            buzzerState = !buzzerState;
             digitalWrite(BUZZER_PIN, buzzerState ? HIGH : LOW);
             previousBuzzTime = currentTime;
         }
     }
-    digitalWrite(BUZZER_PIN, LOW); // Đảm bảo buzzer tắt khi thoát
-    theftDetected = false; // Reset trạng thái trộm sau khi kết thúc
+    digitalWrite(BUZZER_PIN, LOW);
+    theftDetected = false;
     espSerial.println("Buzzer Theft Ended");
 }
 
@@ -248,7 +257,6 @@ void changePIN() {
     lcd.print("Nhap PIN moi:");
     String newPIN = "";
     
-    // Nhập PIN mới lần 1
     while (true) {
         char key = keypad.getKey();
         if (key) {
@@ -256,10 +264,10 @@ void changePIN() {
             if (key >= '0' && key <= '9') {
                 newPIN += key;
                 lcd.setCursor(0, 1);
-                lcd.print(newPIN); // Hiển thị trực tiếp PIN
+                lcd.print(newPIN);
             } else if (key == '#') {
                 if (newPIN.length() >= 4) {
-                    break; // Thoát vòng lặp để sang xác nhận
+                    break;
                 } else {
                     lcd.clear();
                     lcd.print("PIN qua ngan!");
@@ -268,10 +276,10 @@ void changePIN() {
                     lcd.clear();
                     lcd.print("Nhap PIN moi:");
                 }
-            } else if (key == 'D') { // Thoát về Admin Menu
+            } else if (key == 'D') {
                 showAdminMenu();
                 return;
-            } else if (key == '*') { // Xóa PIN đang nhập
+            } else if (key == '*') {
                 newPIN = "";
                 lcd.setCursor(0, 1);
                 lcd.print("                ");
@@ -280,11 +288,10 @@ void changePIN() {
         }
     }
 
-    // Xác nhận PIN mới
     lcd.clear();
     lcd.print("Xac nhan PIN:");
     String confirmPIN = "";
-    int confirmFailCount = 0; // Đếm số lần xác nhận sai
+    int confirmFailCount = 0;
     
     while (true) {
         char key = keypad.getKey();
@@ -293,10 +300,11 @@ void changePIN() {
             if (key >= '0' && key <= '9') {
                 confirmPIN += key;
                 lcd.setCursor(0, 1);
-                lcd.print(confirmPIN); // Hiển thị trực tiếp PIN xác nhận
+                lcd.print(confirmPIN);
             } else if (key == '#') {
                 if (confirmPIN == newPIN) {
                     currentPIN = newPIN;
+                    writePINToEEPROM(currentPIN); // Lưu PIN mới vào EEPROM
                     lcd.clear();
                     lcd.print("PIN da doi!");
                     sendLog("Admin", "PIN_Changed");
@@ -327,13 +335,13 @@ void changePIN() {
                         delay(1000);
                         lcd.clear();
                         lcd.print("Xac nhan PIN:");
-                        confirmPIN = ""; // Reset để nhập lại
+                        confirmPIN = "";
                     }
                 }
-            } else if (key == 'D') { // Thoát về Admin Menu
+            } else if (key == 'D') {
                 showAdminMenu();
                 return;
-            } else if (key == '*') { // Xóa PIN xác nhận đang nhập
+            } else if (key == '*') {
                 confirmPIN = "";
                 lcd.setCursor(0, 1);
                 lcd.print("                ");
@@ -579,5 +587,25 @@ void checkVibration() {
         showMenu();
     } else if (digitalRead(VIBRATION_PIN) == LOW) {
         theftDetected = false;
+    }
+}
+
+void readPINFromEEPROM() {
+    char storedPIN[5]; // 4 ký tự + '\0'
+    for (int i = 0; i < 4; i++) {
+        storedPIN[i] = EEPROM.read(PIN_ADDRESS + i);
+    }
+    storedPIN[4] = '\0';
+    
+    if (storedPIN[0] >= '0' && storedPIN[0] <= '9') {
+        currentPIN = String(storedPIN);
+    } else {
+        currentPIN = "";
+    }
+}
+
+void writePINToEEPROM(String pin) {
+    for (int i = 0; i < 4; i++) {
+        EEPROM.write(PIN_ADDRESS + i, pin[i]);
     }
 }
